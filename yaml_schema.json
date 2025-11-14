@@ -1,18 +1,16 @@
-import importlib
-from typing import Callable, Dict, List
-
-_CLASS_REGISTRY: Dict[str, List[str]] = {
-    "app.spec.kafka.subject": ["Subject"]
-}
+import inspect
 
 
-def resolve_class(name: str) -> Callable:
-    result = next(
-        ((key, name) for key, values in _CLASS_REGISTRY.items() if name in values),
-        None
-    )
-    if not result:
-        raise ValueError(f"Unknown function in _CLASS_REGISTRY : {name}")
-    module_name, attr = result
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
+def get_instance_methods_with_inputs(cls):
+    result = {}
+    for name, member in cls.__dict__.items():
+        if inspect.isfunction(member):  # instance method
+            sig = inspect.signature(member)
+            # Exclude 'self' and check for other parameters
+            params = [p for p in sig.parameters.values() if p.name != 'self']
+            result[name] = {
+                "is_instance_method": True,
+                "has_input": len(params) > 0,
+                "input_parameters": [p.name for p in params]
+            }
+    return result
