@@ -1,217 +1,103 @@
 functions:
-  str_to_bool:
-    - case_id: UT0001
-      description: Validate boolean is returned when it has value true
+  get_latest_key:
+    - case_id: S3C0001
+      description: Get latest key from S3 with valid partition
       input:
-        - column: value
-          value: "true"
-      expected:
-        result: true
-
-    - case_id: UT0002
-      description: Validate boolean false is returned when it has value false
-      input:
-        - column: value
-          value: "false"
-      expected:
-        result: false
-
-    - case_id: UT0003
-      description: any values other than true or false should return false
-      input:
-        - column: value
-          value: "1"
-      expected:
-        result: false
-
-
-  create_hash:
-    - case_id: UT0004
-      description: Validate based on a particular row it generates a hash
-      input:
-        - column: row
-          value: "edi-recon"
-      expected:
-        result: "4c4d18b65204167e843636e97fab2b9911549036f72b868142faf7ded6ddb7b6"
-        return_datatype: "str"
-
-  platform_specific_topic_name:
-    - case_id: UT0005
-      description: Reads CSV from config attribute
-      input:
-        - column: pf_type
-          value: "watchtower"
+        - column: bucket
+          value: "my-bucket"
+        - column: prefix
+          value: "data/"
+        - column: file_type
+          value: ".csv"
+        - column: arn_type
+          value: null
       mocks:
-        - target: "src.app.utils.AppUtility.config.watchtower_platform_topic_map"
-          return_value: "platform,topic_name\nSNOWFLAKE_TC,dei.recon.job.queue\nDLR_PROCESSED,dei.recon.profiler.notification.dlr\nSNOWFLAKE,dei.recon.profiler.notification.snowflake"
-          return_datatype: "str"
+        - target: "src.app.utils.s3_util.get_s3_client"
+          return_value:
+            get_paginator.return_value.paginate.return_value:
+              - Contents:
+                  - Key: "data/business_date=2025-10-01/file.csv"
+                    LastModified: "2025-10-01T12:00:00"
       expected:
         result:
-          columns: [ "platform","topic_name" ]
-          rows:
-            - [ "SNOWFLAKE_TC","dei.recon.job.queue" ]
-            - [ "DLR_PROCESSED","dei.recon.profiler.notification.dlr" ]
-            - [ "SNOWFLAKE","dei.recon.profiler.notification.snowflake" ]
-        return_datatype: dataframe
+          - "2025-10-01"
+          - "data/business_date=2025-10-01"
+          - "2025-10-01T12:00:00"
 
-  get_watermark_attr:
-    - case_id: UT0006
-      description: Extracts watermark values and parses datetime
+  list_s3_object:
+    - case_id: S3C0002
+      description: List S3 objects filtered by filetype
       input:
-        - column: watermark_attrs_data
-          value:
-            watchtower:
-              watermark_value: "2025-10-01 12:30:00"
-              previous_value: "2025-09-30 12:30:00"
-        - column: watermark_attr_key
-          value: "watchtower"
-      expected:
-        result: "2025-10-01 12:30:00,2025-09-30 12:30:00"
-        return_datatype: tuple[datetime,str]
-
-
-  build_job_name:
-    - case_id: UT0007
-      description: Retry job name construction
-      input:
-        - column: "dummy"
-          value: "placeholder"
+        - column: bucket
+          value: "my-bucket"
+        - column: prefix
+          value: "data/"
+        - column: filetype
+          value: "parquet"
+        - column: arn_type
+          value: null
       mocks:
-        - target: "os.getenv"
-          side_effect:
-            - "RETRY"
-            - "PLATFORM_X"
-            - "CHECK_Y"
-      expected:
-        result: "dei.ccr.cdc.platform_x.check_y.retry"
-        return_datatype: str
-
-    - case_id: UT0008
-      description: Snow alert job name construction
-      input:
-        - column: "dummy"
-          value: "placeholder"
-      mocks:
-        - target: "os.getenv"
-          side_effect:
-            - "SNOW_ALERT"
-            - "AWS"
-            - "VOLUME1"
-      expected:
-        result: "dei.ccr.cdc.aws.volume1.snow-alert"
-        return_datatype: str
-
-    - case_id: UT0009
-      description: Default job name construction
-      input:
-        - column: "dummy"
-          value: "placeholder"
-      mocks:
-        - target: "os.getenv"
-          side_effect:
-            - "INCREMENTAL"
-            - "AZURE"
-            - "CHECK_Z"
-      expected:
-        result: "dei.ccr.cdc.azure.check_z"
-        return_datatype: str
-
-  date_format:
-    - case_id: UT0010
-      description: Convert HADOOP date from string to datetime
-      input:
-        - column: date
-          value: "2025-10-01"
-        - column: type
-          value: "HADOOP"
-        - column: format
-          value: "change"
-      expected:
-        result: "2025-10-01"
-        return_datatype: datetime
-
-  is_valid_date:
-    - case_id: UT0011
-      description: Valid HADOOP date returns True
-      input:
-        - column: date_str
-          value: "2025-10-01"
-        - column: platform
-          value: "HADOOP"
-      expected:
-        result: true
-        return_datatype: bool
-
-  lazy_load_function:
-    - case_id: UT0012
-      description: Should call the function only once and return cached result
-      input:
-        - column: dummy
-          value: "placeholder"
-      expected:
-        result: [ "loaded-1", "loaded-1", "loaded-1" ]
-        return_datatype: list
-  batch:
-    - case_id: UT0013
-      description: Batch list of 5 items into chunks of 2
-      input:
-        - column: iterable
-          value: [ 1, 2, 3, 4, 5 ]
-        - column: n
-          value: 2
+        - target: "src.app.utils.s3_util.get_s3_client"
+          return_value:
+            get_paginator.return_value.paginate.return_value.search.return_value:
+              - Key: "data/entity/attribute/business_date=2025-10-01/file.parquet"
+                LastModified: "2025-10-01T12:00:00"
       expected:
         result:
-          - [ 1, 2 ]
-          - [ 3, 4 ]
-          - [ 5 ]
+          - Key: "data/entity/attribute/business_date=2025-10-01/file.parquet"
+            LastModified: "2025-10-01T12:00:00"
 
-    - case_id: UT0014
-      description: Batch list of 4 items into chunks of 3
+  get_latest_objects_by_bucket:
+    - case_id: S3C0003
+      description: Get latest S3 objects grouped by entity
       input:
-        - column: iterable
-          value: [ "a", "b", "c", "d" ]
-        - column: n
-          value: 3
+        - column: bucket
+          value: "my-bucket"
+        - column: prefix
+          value: "data/"
+        - column: has_db_prefix
+          value: false
+        - column: is_wildcard_search
+          value: false
+        - column: arn_type
+          value: null
+        - column: uri_include
+          value: null
+        - column: uri_exclude
+          value: null
+        - column: filetype
+          value: "parquet"
+      mocks:
+        - target: "src.app.utils.s3_util.list_s3_object"
+          return_value:
+            - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-10-01/file.parquet"
+              LastModified: "2025-10-01T12:00:00"
+              Size: 1234
+              ETag: "etag"
+              StorageClass: "STANDARD"
+            - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-09-30/file.parquet"
+              LastModified: "2025-09-30T12:00:00"
+              Size: 1234
+              ETag: "etag"
+              StorageClass: "STANDARD"
       expected:
         result:
-          - [ "a", "b", "c" ]
-          - [ "d"]
+          - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-10-01"
+            LastModified: "2025-10-01T12:00:00"
+            Size: 1234
+            entity: "entity"
+            entity_attribute: "attribute"
+            src_sys_inst_id: "123"
+            business_date: "2025-10-01"
 
 
-  construct_connection_id:
-    - case_id: UT0015
-      description: Construct connection ID with platform and brand
-      input:
-        - column: platform
-          value: "SNOWFLAKE"
-        - column: brand
-          value: "BRAND_X"
-      mocks:
-        - target: "src.app.utils.AppUtility.config.app_env"
-          return_value: "dev"
-          return_datatype: "str"
-      expected:
-        result: "dev/dei-recon-dbconnector/rdbms/snowflake/brand_x"
 
-    - case_id: UT0016
-      description: Construct connection ID with platform only
-      input:
-        - column: platform
-          value: "DLR_PROCESSED"
-      mocks:
-        - target: "src.app.utils.AppUtility.config.app_env"
-          return_value: "prod"
-          return_datatype: "str"
-      expected:
-        result: "prod/dei-recon-dbconnector/rdbms/dlr_processed"
 
-  application_log:
-    - case_id: UT0017
-      description: Decorator logs and returns correct result
-      input:
-        - column: a
-          value: 5
-        - column: b
-          value: 3
-      expected:
-        result: 8
+
+
+
+
+
+
+
+
