@@ -1,103 +1,228 @@
-functions:
-  get_latest_key:
-    - case_id: S3C0001
-      description: Get latest key from S3 with valid partition
-      input:
-        - column: bucket
-          value: "my-bucket"
-        - column: prefix
-          value: "data/"
-        - column: file_type
-          value: ".csv"
-        - column: arn_type
-          value: null
-      mocks:
-        - target: "src.app.utils.s3_util.get_s3_client"
-          return_value:
-            get_paginator.return_value.paginate.return_value:
-              - Contents:
-                  - Key: "data/business_date=2025-10-01/file.csv"
-                    LastModified: "2025-10-01T12:00:00"
-      expected:
-        result:
-          - "2025-10-01"
-          - "data/business_date=2025-10-01"
-          - "2025-10-01T12:00:00"
+import builtins
+import os
+import re
+from datetime import datetime
+from functools import wraps
+from io import StringIO
 
-  list_s3_object:
-    - case_id: S3C0002
-      description: List S3 objects filtered by filetype
-      input:
-        - column: bucket
-          value: "my-bucket"
-        - column: prefix
-          value: "data/"
-        - column: filetype
-          value: "parquet"
-        - column: arn_type
-          value: null
-      mocks:
-        - target: "src.app.utils.s3_util.get_s3_client"
-          return_value:
-            get_paginator.return_value.paginate.return_value.search.return_value:
-              - Key: "data/entity/attribute/business_date=2025-10-01/file.parquet"
-                LastModified: "2025-10-01T12:00:00"
-      expected:
-        result:
-          - Key: "data/entity/attribute/business_date=2025-10-01/file.parquet"
-            LastModified: "2025-10-01T12:00:00"
+import pandas as pd
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import hashes
 
-  get_latest_objects_by_bucket:
-    - case_id: S3C0003
-      description: Get latest S3 objects grouped by entity
-      input:
-        - column: bucket
-          value: "my-bucket"
-        - column: prefix
-          value: "data/"
-        - column: has_db_prefix
-          value: false
-        - column: is_wildcard_search
-          value: false
-        - column: arn_type
-          value: null
-        - column: uri_include
-          value: null
-        - column: uri_exclude
-          value: null
-        - column: filetype
-          value: "parquet"
-      mocks:
-        - target: "src.app.utils.s3_util.list_s3_object"
-          return_value:
-            - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-10-01/file.parquet"
-              LastModified: "2025-10-01T12:00:00"
-              Size: 1234
-              ETag: "etag"
-              StorageClass: "STANDARD"
-            - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-09-30/file.parquet"
-              LastModified: "2025-09-30T12:00:00"
-              Size: 1234
-              ETag: "etag"
-              StorageClass: "STANDARD"
-      expected:
-        result:
-          - Key: "entity/attribute/src_sys_inst_id=123/business_date=2025-10-01"
-            LastModified: "2025-10-01T12:00:00"
-            Size: 1234
-            entity: "entity"
-            entity_attribute: "attribute"
-            src_sys_inst_id: "123"
-            business_date: "2025-10-01"
+from app import config, platform_defaults
+from app.commons.logging import logger
+from app.platform_defaults import DATE_FORMAT_DEFAULT
 
 
+def get_watermark_attr(watermark_attrs_data, watermark_attr_key):
+    current_value = watermark_attrs_data.get(watermark_attr_key).get('watermark_value')
+    current_value_dt = datetime.strptime(current_value, DATE_FORMAT_DEFAULT)
+    prev_value = watermark_attrs_data.get(watermark_attr_key).get('previous_value')
+    # if prev_value:
+    #   previous_value_dt = datetime.strptime(prev_value, '%Y-%m-%d %H:%M:%S')
+    return current_value_dt, prev_value
 
 
+def build_job_name():
+    job_type = os.getenv('job_type')
+    job_name = None
+    if job_type == 'RETRY':
+        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower(),
+                             'retry'])
+    elif job_type == 'SNOW_ALERT':
+        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower(),
+                             'snow-alert'])
+    elif job_type == 'REPLICATE_TO_ONPREM':
+        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('table_attribute').lower()])
+    elif job_type == 'FEED_BATCH':
+        job_name = '.'.join(['dei.ccr.cdc', os.getenv('feed_system_name').lower(), 'batch', 'replicator'])
+
+    else:
+        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower()])
+    return job_name
 
 
+def date_format(date, type, format='change'):
+    """Code to convert date type according to platform : Author: Saibal
+          Generic Custom Recon_SQL for volume calculation
+          @params date: BUSINESS DATE FOR THE FEED RUN
+          @params type : Identify the type of feed. EDI/EDW/HADOOP/INFA/APP/MONGODB.
+          @params format: 'change' will format it into EDI specific format.
+                          'revert' will revert back to the format according to type.
+          result: The result is either a date or None in case of exception.
+                          Any exception which occurs will be logged as Error in log file."""
+    changed_date = None
+    try:
+        # EDIDI-901: Added DLR specific changes
+        # EDIDI-1188 R23.4 - New DLR Connection
+        # EDIDI-1203: Added or condition to last elif to include 'GMS'
+        if type in ('HADOOP', 'SNOWFLAKE', 'DLR', 'DLR_1'):
+            if format == 'change':
+                changed_date = datetime.strptime(date, '%Y-%m-%d')
+            elif format == 'revert':
+                changed_date = date.strftime('%Y-%m-%d')
+        elif type in ('EDW', 'EDW_IBDP'):
+            if format == 'change':
+                changed_date = datetime.strptime(date, '%d/%m/%Y').strftime('%Y-%m-%d') + ' 00:00:00'
+            elif format == 'revert':
+                changed_date = date.strftime('%d/%m/%Y')
+        elif type == 'INFA':
+            if format == 'change':
+                changed_date = datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d') + ' 00:00:00'
+            elif format == 'revert':
+                changed_date = date.strftime('%Y%m%d')
+        elif type in ['EDI', 'AML_ODS', 'BDM']:
+            changed_date = date
+        elif type == 'QSAI':
+            # date_object = datetime.strptime(date, '%Y-%m-%d')
+            changed_date = date.strftime('%d-%m-%Y')
+    except ValueError as exception:
+        logger.error('date_format :  %s', exception, exc_info=0)
+    return changed_date
 
 
+def is_valid_date(date_str, platform='HADOOP'):
+    return True if date_format(date_str, platform) else False
 
 
+def application_log(value, execution_time=False, keywords_hidden=False, function_help=False):
+    """
+    Measure performance of a function
+    @param value: The function information you want to audit
+    @param execution_time:  If true, this will capture the execution time
+    @param keywords_hidden:  If true, the functional arguments are hidden
+    @param function_help:  If true, the function and its help pages are displayed
+    @return: the decorator.
+    """
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            start_time = None
+            if execution_time: start_time = datetime.now()
+            logger.info("-" * 39 + "*")
+            if function_help:
+                logger.info(f"Function: {0} Help:{1}".format(func.__name__, func.__doc__))
+            logger.info(f"{value} started.")
+            if not keywords_hidden:
+                builtins.print(*args, **kwargs)
+            response = func(*args, **kwargs)
+            logger.info(f"{value} completed.")
+            if execution_time:
+                logger.info("*" + "-" * 38 + "*")
+                finish_time = datetime.now()
+                response_time = finish_time - start_time
+                response_time_seconds = response_time.total_seconds()
+                logger.info("Response time: total seconds : {}".format(response_time_seconds))
+                if response_time_seconds > 10:
+                    logger.info(
+                        "Function: {0} : Response time[{1}] is more than 10s. May require tuning.".format(func.__name__,
+                                                                                                          response_time))
+            logger.info("*" + "-" * 39)
+            return response
+
+        return wrapper
+
+    return decorator
 
 
+def construct_connection_id(platform, brand=None):
+    connection_id_args = [config.app_env, 'dei-recon-dbconnector/rdbms', platform]
+    if brand:
+        connection_id_args.append(brand)
+    connection_id = "/".join(connection_id_args)
+    return connection_id.lower()
+
+
+def get_max_retry_default(platform, recon_check):
+    max_retry_default = 0
+    if platform in platform_defaults.retry_config:
+        retry_config_root = platform_defaults.retry_config[platform]
+        if recon_check in retry_config_root:
+            retry_config_by_recon_check = retry_config_root.get(recon_check)
+            if 'max_retry' in retry_config_by_recon_check:
+                max_retry_default = retry_config_by_recon_check.get('max_retry')
+
+    return max_retry_default
+
+
+def resolve_secret_key(service_name, *args):
+    key_path_params = [config.app_env, config.app_name, service_name]
+    if len(args) > 0:
+        key_path_params.extend(args)
+    return "/".join(key_path_params).lower()
+
+
+def get_bank_holidays():
+    return None
+
+
+# Create batch of 999 so that there is no impact in DB
+def batch(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+
+# Create hash of records
+def create_hash(row):
+    digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
+    digest.update(bytes(row, 'utf-8'))
+    return digest.finalize().hex()
+
+
+def str_to_bool(value: str) -> bool:
+    mapping = {"true": True, "false": False}
+    return mapping.get(value.lower(), False) if value else False
+
+
+def lazy_load_function(func):
+    """
+
+    Parameters
+    ----------
+    func: function to accept lazy data
+
+    Returns
+    -------
+    Load data in lazy format.
+    """
+    data = None
+
+    def wrapper(*args, **kwargs):
+        # noinspection PyCompatibility
+        nonlocal data
+        if data is None:
+            data = func(*args, **kwargs)
+        return data
+
+    return wrapper
+
+
+def platform_specific_topic_name(pf_type):
+    platform_topic_map = pf_type.lower() + '_platform_topic_map'
+    try:
+        platform_topic_map = pd.read_csv(StringIO(getattr(config, platform_topic_map, None)))
+    except Exception as e:
+        logger.error('Failed to read originator map: {}'.format(e))
+    return platform_topic_map
+
+
+def extract_db_name(common_prefixes, db_name_pattern):
+    """
+    Generator to yield substring starting with 'bdw' and ending with 'p' from 'Prefix' values.
+
+    Args:
+        common_prefixes (list of dict): List of dictionaries with key 'Prefix'.
+        db_name_pattern: db name text pattern
+
+    Yields:
+        str: Substring matching the db_name_pattern.
+    """
+    pattern = re.compile(db_name_pattern)
+
+    for d in common_prefixes:
+        prefix_val = d.get('Prefix', '')
+        match = pattern.search(prefix_val)
+        if match:
+            yield match.group(1)
