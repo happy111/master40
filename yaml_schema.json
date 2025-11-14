@@ -1,228 +1,228 @@
-import builtins
-import os
 import re
-from datetime import datetime
-from functools import wraps
-from io import StringIO
 
 import pandas as pd
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import hashes
 
-from app import config, platform_defaults
+from app.commons.aws.boto3_service import S3Session
+from app.commons.exception.exc import ReconAppException
 from app.commons.logging import logger
-from app.platform_defaults import DATE_FORMAT_DEFAULT
+from app.utils.AppUtility import is_valid_date, application_log
+import botocore.exceptions
 
 
-def get_watermark_attr(watermark_attrs_data, watermark_attr_key):
-    current_value = watermark_attrs_data.get(watermark_attr_key).get('watermark_value')
-    current_value_dt = datetime.strptime(current_value, DATE_FORMAT_DEFAULT)
-    prev_value = watermark_attrs_data.get(watermark_attr_key).get('previous_value')
-    # if prev_value:
-    #   previous_value_dt = datetime.strptime(prev_value, '%Y-%m-%d %H:%M:%S')
-    return current_value_dt, prev_value
-
-
-def build_job_name():
-    job_type = os.getenv('job_type')
-    job_name = None
-    if job_type == 'RETRY':
-        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower(),
-                             'retry'])
-    elif job_type == 'SNOW_ALERT':
-        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower(),
-                             'snow-alert'])
-    elif job_type == 'REPLICATE_TO_ONPREM':
-        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('table_attribute').lower()])
-    elif job_type == 'FEED_BATCH':
-        job_name = '.'.join(['dei.ccr.cdc', os.getenv('feed_system_name').lower(), 'batch', 'replicator'])
-
-    else:
-        job_name = '.'.join(['dei.ccr.cdc', os.getenv('platform').lower(), os.getenv('recon_check_type').lower()])
-    return job_name
-
-
-def date_format(date, type, format='change'):
-    """Code to convert date type according to platform : Author: Saibal
-          Generic Custom Recon_SQL for volume calculation
-          @params date: BUSINESS DATE FOR THE FEED RUN
-          @params type : Identify the type of feed. EDI/EDW/HADOOP/INFA/APP/MONGODB.
-          @params format: 'change' will format it into EDI specific format.
-                          'revert' will revert back to the format according to type.
-          result: The result is either a date or None in case of exception.
-                          Any exception which occurs will be logged as Error in log file."""
-    changed_date = None
+@application_log(value='get_latest_key', keywords_hidden=True)
+def get_latest_key(bucket, prefix, file_type, arn_type=None):
     try:
-        # EDIDI-901: Added DLR specific changes
-        # EDIDI-1188 R23.4 - New DLR Connection
-        # EDIDI-1203: Added or condition to last elif to include 'GMS'
-        if type in ('HADOOP', 'SNOWFLAKE', 'DLR', 'DLR_1'):
-            if format == 'change':
-                changed_date = datetime.strptime(date, '%Y-%m-%d')
-            elif format == 'revert':
-                changed_date = date.strftime('%Y-%m-%d')
-        elif type in ('EDW', 'EDW_IBDP'):
-            if format == 'change':
-                changed_date = datetime.strptime(date, '%d/%m/%Y').strftime('%Y-%m-%d') + ' 00:00:00'
-            elif format == 'revert':
-                changed_date = date.strftime('%d/%m/%Y')
-        elif type == 'INFA':
-            if format == 'change':
-                changed_date = datetime.strptime(date, '%Y%m%d').strftime('%Y-%m-%d') + ' 00:00:00'
-            elif format == 'revert':
-                changed_date = date.strftime('%Y%m%d')
-        elif type in ['EDI', 'AML_ODS', 'BDM']:
-            changed_date = date
-        elif type == 'QSAI':
-            # date_object = datetime.strptime(date, '%Y-%m-%d')
-            changed_date = date.strftime('%d-%m-%Y')
-    except ValueError as exception:
-        logger.error('date_format :  %s', exception, exc_info=0)
-    return changed_date
+        s3_client = get_s3_client(arn_type)
+        operation_parameters = {'Bucket': bucket, 'Prefix': prefix}
+        logger.info(f'Getting latest key for {bucket}/{prefix}')
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages_iterator = paginator.paginate(**operation_parameters)
+        all_files = []
+        for pages in pages_iterator:
+            if pages.get('Contents'):
+                all_files.extend(
+                    [(page['Key'], page['LastModified']) for page in pages['Contents']
+                     if file_type and file_type.lower() in page['Key']])
+            else:
+                logger.info(pages)
+        if len(all_files) == 0:
+            logger.info("No page found")
+            return None, None, None
+        all_files.sort(reverse=True, key=lambda x: x[1])
+        recent_file = all_files[0][0]
+        last_modified = all_files[0][1]
+        logger.debug("recent_file : {0}".format(recent_file))
+        folder_object_key_list = recent_file.split('/')[:-1]
+        partition_list = list(filter(lambda folder_object_key: len(folder_object_key.split('=')) == 2 and
+                                                               is_valid_date(folder_object_key.split('=')[1]),
+                                     folder_object_key_list))
+        logger.info("partition_list : {0}".format(partition_list))
+        business_date = partition_list[0].split('=')[1]
+        file_path = '/'.join(folder_object_key_list)
+        logger.info(f'latest key found for {bucket}/{prefix}')
+        logger.info(f'last_modified : {last_modified}')
+        logger.debug("business_date : {0}".format(business_date))
+        return business_date, file_path, last_modified
+    except ReconAppException as recon_app_exception:
+        logger.error("Error while fetching the latest business date : %s", recon_app_exception, exc_info=0)
+    return None, None, None
 
 
-def is_valid_date(date_str, platform='HADOOP'):
-    return True if date_format(date_str, platform) else False
+def get_s3_client(arn_type):
+    return S3Session(assumed_role=arn_type).get_client()
 
 
-def application_log(value, execution_time=False, keywords_hidden=False, function_help=False):
-    """
-    Measure performance of a function
-    @param value: The function information you want to audit
-    @param execution_time:  If true, this will capture the execution time
-    @param keywords_hidden:  If true, the functional arguments are hidden
-    @param function_help:  If true, the function and its help pages are displayed
-    @return: the decorator.
-    """
-
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            start_time = None
-            if execution_time: start_time = datetime.now()
-            logger.info("-" * 39 + "*")
-            if function_help:
-                logger.info(f"Function: {0} Help:{1}".format(func.__name__, func.__doc__))
-            logger.info(f"{value} started.")
-            if not keywords_hidden:
-                builtins.print(*args, **kwargs)
-            response = func(*args, **kwargs)
-            logger.info(f"{value} completed.")
-            if execution_time:
-                logger.info("*" + "-" * 38 + "*")
-                finish_time = datetime.now()
-                response_time = finish_time - start_time
-                response_time_seconds = response_time.total_seconds()
-                logger.info("Response time: total seconds : {}".format(response_time_seconds))
-                if response_time_seconds > 10:
-                    logger.info(
-                        "Function: {0} : Response time[{1}] is more than 10s. May require tuning.".format(func.__name__,
-                                                                                                          response_time))
-            logger.info("*" + "-" * 39)
-            return response
-
-        return wrapper
-
-    return decorator
-
-
-def construct_connection_id(platform, brand=None):
-    connection_id_args = [config.app_env, 'dei-recon-dbconnector/rdbms', platform]
-    if brand:
-        connection_id_args.append(brand)
-    connection_id = "/".join(connection_id_args)
-    return connection_id.lower()
-
-
-def get_max_retry_default(platform, recon_check):
-    max_retry_default = 0
-    if platform in platform_defaults.retry_config:
-        retry_config_root = platform_defaults.retry_config[platform]
-        if recon_check in retry_config_root:
-            retry_config_by_recon_check = retry_config_root.get(recon_check)
-            if 'max_retry' in retry_config_by_recon_check:
-                max_retry_default = retry_config_by_recon_check.get('max_retry')
-
-    return max_retry_default
-
-
-def resolve_secret_key(service_name, *args):
-    key_path_params = [config.app_env, config.app_name, service_name]
-    if len(args) > 0:
-        key_path_params.extend(args)
-    return "/".join(key_path_params).lower()
-
-
-def get_bank_holidays():
-    return None
-
-
-# Create batch of 999 so that there is no impact in DB
-def batch(iterable, n=1):
-    l = len(iterable)
-    for ndx in range(0, l, n):
-        yield iterable[ndx:min(ndx + n, l)]
-
-
-# Create hash of records
-def create_hash(row):
-    digest = hashes.Hash(hashes.SHA256(), backend=default_backend())
-    digest.update(bytes(row, 'utf-8'))
-    return digest.finalize().hex()
-
-
-def str_to_bool(value: str) -> bool:
-    mapping = {"true": True, "false": False}
-    return mapping.get(value.lower(), False) if value else False
-
-
-def lazy_load_function(func):
-    """
-
-    Parameters
-    ----------
-    func: function to accept lazy data
-
-    Returns
-    -------
-    Load data in lazy format.
-    """
-    data = None
-
-    def wrapper(*args, **kwargs):
-        # noinspection PyCompatibility
-        nonlocal data
-        if data is None:
-            data = func(*args, **kwargs)
-        return data
-
-    return wrapper
-
-
-def platform_specific_topic_name(pf_type):
-    platform_topic_map = pf_type.lower() + '_platform_topic_map'
+def get_latest_objects_by_bucket(bucket, prefix, has_db_prefix, is_wildcard_search, arn_type=None, uri_include=None,
+                                 uri_exclude=None, filetype='parquet' , is_all_db_scan=False) -> pd.DataFrame:
+    latest_records_df = pd.DataFrame(columns=['Key', 'LastModified', 'Size', 'entity', 'entity_attribute',
+                                              'src_sys_inst_id', 'business_date'])
     try:
-        platform_topic_map = pd.read_csv(StringIO(getattr(config, platform_topic_map, None)))
-    except Exception as e:
-        logger.error('Failed to read originator map: {}'.format(e))
-    return platform_topic_map
+        dataset_uri_list = list_s3_object(bucket, prefix, filetype=filetype, arn_type=arn_type)
+        logger.info("list_s3_object : %s", len(dataset_uri_list))
+
+        s3_object_content_list = [] if is_wildcard_search else list(dataset_uri_list)
+        # logger.info("collected %s objects", s3_object_content_list)
+        if uri_include:
+            logger.info("get_latest_objects_by_bucket : object selection is in progress")
+            uri_pattern = [re.compile(uri) for uri in uri_include]
+            selected_object_list = []
+            for content in dataset_uri_list:
+                # select the required pattern
+                if any(re.match(pattern, content['Key']) for pattern in uri_pattern):
+                    selected_object_list.append(content)
+
+            if uri_exclude is None:
+                s3_object_content_list = selected_object_list
+            else:
+                # Filter by exclude pattern
+                logger.info("get_latest_objects_by_bucket : object filtering is in progress")
+                uri_exclusion_pattern = [re.compile(uri) for uri in uri_exclude]
+                for selected_object in selected_object_list:
+                    if not any(re.match(pattern, selected_object['Key']) for pattern in uri_exclusion_pattern):
+                        s3_object_content_list.append(selected_object)
+        if len(s3_object_content_list) == 0:
+            logger.info("collected %s objects", len(latest_records_df))
+            return latest_records_df
+        else:
+            s3_object_content_df = pd.DataFrame(s3_object_content_list)
+            # Determine column structure based on `has_db_prefix` and `src_sys_inst_id` presence
+            column_list = ['entity', 'entity_attribute', 'business_date', 'dataset']
+            if has_db_prefix:
+                column_list.insert(0, 'file_prefix')
+            if s3_object_content_df['Key'].str.contains('src_sys_inst_id').any():
+                column_list.insert(column_list.index('business_date'), 'src_sys_inst_id')
+            logger.info(s3_object_content_df['Key'].values)
+            s3_object_content_df[column_list] = s3_object_content_df['Key'].str.split('/', expand=True)
+            s3_object_content_df['Key'] = s3_object_content_df['Key'].apply(lambda key: "/".join(key.split('/')[0:-1]))
+
+            # Handle `src_sys_inst_id` only if present
+            if 'src_sys_inst_id' in s3_object_content_df.columns:
+                s3_object_content_df['src_sys_inst_id'] = s3_object_content_df['src_sys_inst_id'].apply(
+                    lambda x: x.split("=")[1])
+            s3_object_content_df['business_date'] = s3_object_content_df['business_date'].apply(
+                lambda bday: bday.split("=")[1])
+            s3_object_content_df['business_date'] = pd.to_datetime(s3_object_content_df['business_date']).dt.date
+            column_groups = ['entity', 'entity_attribute']
+            if 'src_sys_inst_id' in s3_object_content_df.columns:
+                column_groups.append('src_sys_inst_id')
+            latest_indices = s3_object_content_df.groupby(column_groups)['LastModified'].idxmax()
+            latest_records_df = s3_object_content_df.loc[latest_indices]
+            latest_records_df.drop(columns=['ETag', 'dataset', 'StorageClass'], inplace=True)
+            logger.debug(latest_records_df.dtypes)
+            logger.debug(latest_records_df)
+            json_str = latest_records_df.to_json(orient='records', date_format='iso')
+            logger.debug(json_str)
+            logger.info("collected %s objects", len(latest_records_df))
+            return latest_records_df
+    except ReconAppException as recon_app_exception:
+        logger.error("get_latest_objects_by_bucket : Error while fetching the s3 objects : %s", recon_app_exception,
+                     exc_info=True)
+        return latest_records_df
+    except Exception as exception:
+        logger.error("get_latest_objects_by_bucket : Error while fetching the s3 objects : %s", exception,
+                     exc_info=True)
+        return latest_records_df
 
 
-def extract_db_name(common_prefixes, db_name_pattern):
+def list_s3_object(bucket, prefix, filetype='parquet', arn_type=None):
+    logger.info("list_s3_object : %s/%s", bucket, prefix)
+    try:
+        s3_client = get_s3_client(arn_type)
+        operation_parameters = {'Bucket': bucket, 'Prefix': prefix}
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages_iterator = paginator.paginate(**operation_parameters)
+        logger.info(f"Contents[?ends_with(Key, '{filetype}')]")
+        dataset_uri_list = pages_iterator.search(f"Contents[?ends_with(Key, '{filetype}')]")
+        return list(filter(bool, dataset_uri_list))
+    except Exception as ex:
+        logger.error("list_s3_object : Error while fetching the s3 objects : %s", ex, exc_info=True)
+        raise ReconAppException(ex)
+
+
+def list_s3_object_with_pagination(bucket, prefix, filetype='parquet', arn_type=None, max_retries=3):
     """
-    Generator to yield substring starting with 'bdw' and ending with 'p' from 'Prefix' values.
+        List all S3 objects under bucket/prefix ending with specified filetype,
+        automatically refreshing S3 client on ExpiredToken errors and resuming
+        pagination from the last successful page.
 
-    Args:
-        common_prefixes (list of dict): List of dictionaries with key 'Prefix'.
-        db_name_pattern: db name text pattern
+        Args:
+            bucket (str): S3 bucket name.
+            prefix (str): S3 key prefix.
+            filetype (str): file suffix filter, e.g. 'parquet'.
+            arn_type (optional): to be passed to get_s3_client.
+            max_retries (int): number of times to retry on credential expiry.
 
-    Yields:
-        str: Substring matching the db_name_pattern.
-    """
-    pattern = re.compile(db_name_pattern)
+        Returns:
+            List[str]: List of S3 object keys matching the suffix.
+        """
+    logger.info("list_s3_object_with_pagination : %s/%s", bucket, prefix)
+    attempt = 0
+    dataset_uri_list = []
+    continuation_token = None  # Tracks next page token to continue from
 
-    for d in common_prefixes:
-        prefix_val = d.get('Prefix', '')
-        match = pattern.search(prefix_val)
-        if match:
-            yield match.group(1)
+    while True:
+        try:
+            # Create or refresh client on each attempt or retry
+            s3_client = get_s3_client(arn_type)
+            paginator = s3_client.get_paginator('list_objects_v2')
+
+            operation_parameters = {'Bucket': bucket, 'Prefix': prefix}
+            if continuation_token:
+                operation_parameters['ContinuationToken'] = continuation_token
+
+            page_iterator = paginator.paginate(**operation_parameters)
+
+            for page in page_iterator:
+                contents = page.get('Contents', [])
+                for obj in contents:
+                    key = obj.get('Key')
+                    if key and key.endswith(filetype):
+                        dataset_uri_list.append(key)
+
+                # If more pages, update continuation_token to next page token
+                if page.get('IsTruncated'):
+                    continuation_token = page.get('NextContinuationToken')
+                else:
+                    # No more pages; pagination complete
+                    continuation_token = None
+
+            # Completed iteration without exceptions; break outer loop
+            break
+
+        except botocore.exceptions.ClientError as e:
+            error_code = e.response['Error']['Code']
+            if error_code == 'ExpiredToken':
+                attempt += 1
+                if attempt > max_retries:
+                    logger.error("Max retries reached while refreshing credentials")
+                    raise ReconAppException("Max retries reached while refreshing credentials")
+
+                logger.warning(f"Credentials expired: refreshing S3 client and resuming pagination "
+                               f"from token: {continuation_token} (attempt {attempt}/{max_retries})")
+                # Loop continues and will recreate client and paginator, resuming from continuation_token
+
+            else:
+                logger.error("list_s3_object : ClientError %s", e, exc_info=True)
+                raise
+
+        except Exception as ex:
+            logger.error("list_s3_object : Error while fetching the s3 objects : %s", ex, exc_info=True)
+            raise ReconAppException(ex)
+    logger.info("list_s3_object_with_pagination : %s", len(dataset_uri_list))
+    return dataset_uri_list
+
+
+def list_folder_common_prefixes(bucket, prefix, arn_type=None):
+    logger.info("list_s3_object : %s/%s", bucket, prefix)
+    try:
+        s3_client = get_s3_client(arn_type)
+        operation_parameters = {'Bucket': bucket, 'Prefix': prefix, 'Delimiter': '/'}
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages_iterator = paginator.paginate(**operation_parameters)
+        for page in pages_iterator:
+            # logger.info(page)
+            prefixes = page.get('CommonPrefixes', [])
+            return prefixes
+    except Exception as ex:
+        logger.error("list_s3_object : Error while fetching the s3 objects : %s", ex, exc_info=True)
+        raise ReconAppException(ex)
