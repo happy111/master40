@@ -1,0 +1,72 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": [
+	"case_id",
+	"description",
+	"input",
+	"expected"
+  ],
+  "properties": {
+	"case_id": {
+	  "type": "string",
+	  "minLength": 1
+	},
+	"description": {
+	  "type": "string",
+	  "minLength": 1
+	},
+	"input": {
+	  "type": "array",
+	  "minItems": 1,
+	  "items": {
+		"type": "object",
+		"required": [
+		  "column",
+		  "value"
+		],
+		"properties": {
+		  "column": {
+			"type": "string",
+			"minLength": 1
+		  },
+		  "value": { }
+		},
+		"additionalProperties": false
+	  }
+	},
+	"expected": {
+	  "type": "object",
+	  "properties": {
+		"result": { },
+		"error": {
+		  "type": [
+			"string",
+			"null"
+		  ]
+		}
+	  },
+	  "additionalProperties": false
+	},
+	"mocks": {
+	  "type": "array",
+	  "items": {
+		"type": "object",
+		"required": [
+		  "target"
+		],
+		"properties": {
+		  "target": {
+			"type": "string"
+		  },
+		  "return_value": { },
+		  "side_effect": {
+			"type": "string"
+		  }
+		},
+		"additionalProperties": false
+	  }
+	}
+  },
+  "additionalProperties": false
+}
