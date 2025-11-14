@@ -1,16 +1,28 @@
-import inspect
+import importlib
+from typing import Callable, Dict, List
+
+_FUNCTION_REGISTRY: Dict[str, List[str]] = {
+    "app.utils.AppUtility": ["str_to_bool", "create_hash", "platform_specific_topic_name",
+                             "get_watermark_attr", "build_job_name", "date_format", "is_valid_date",
+                             "lazy_load_function",
+                             "batch", "construct_connection_id", "application_log"],
+    "app.utils.s3_util": ["get_latest_key"],
+    "app.connectors.kafka.kafka_producer_consumer.KafkaConsumerManager": ["reset_to_begining"],
+    "app.dependencies": ["get_secret_config", "get_secret_as_text", "_get_secret_config",
+                         "_get_secret_config_parameter_store", "get_secret_config_parameter_store"],
+    "app.spec.kafka.default_properties_template": ["db_suffix", "_call_save_tier0_result", "add_app_config",
+                                                   "add_source_connector_config", "add_source_sink_connector_config"],
+
+}
 
 
-def get_instance_methods_with_inputs(cls):
-    result = {}
-    for name, member in cls.__dict__.items():
-        if inspect.isfunction(member):  # instance method
-            sig = inspect.signature(member)
-            # Exclude 'self' and check for other parameters
-            params = [p for p in sig.parameters.values() if p.name != 'self']
-            result[name] = {
-                "is_instance_method": True,
-                "has_input": len(params) > 0,
-                "input_parameters": [p.name for p in params]
-            }
-    return result
+def resolve_function(name: str) -> Callable:
+    result = next(
+        ((key, name) for key, values in _FUNCTION_REGISTRY.items() if name in values),
+        None
+    )
+    if not result:
+        raise ValueError(f"Unknown function in _FUNCTION_REGISTRY : {name}")
+    module_name, attr = result
+    module = importlib.import_module(module_name)
+    return getattr(module, attr)
