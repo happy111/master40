@@ -1,54 +1,42 @@
-from __future__ import annotations
-
-import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-import jsonschema
-import yaml
+import pytest
 
-
-def get_json_schema(schema_type: str) -> Optional[Any]:
-    path = Path(__file__).resolve().parent.parent / "schema" / f"yaml_schema_{schema_type}.json"
-    return json.loads(path.read_text())
+from tests.utils.class_resolver import resolve_class
+from tests.utils.function_resolver import resolve_function
+from tests.utils.yaml_loader import load_function_cases
 
 
-CASE_SCHEMA: Dict[str, Any] = {'function': get_json_schema('function'), 'class': get_json_schema('class')}
+def pytest_generate_tests(metafunc):
+    if "case_data" in metafunc.fixturenames:
+        test_file = Path(metafunc.definition.fspath)
+        yaml_path = Path(*['resources' if part == 'test_cases' else part for part in test_file.parts])
+        yaml_files = yaml_path.parent / f"{yaml_path.stem}.yml"
+        functions = load_function_cases(yaml_files)
+       # func_name = metafunc.function.__name__.replace("test_", "")
+        func_name = metafunc.function.__name__
+        if func_name.startswith("test_"):
+            func_name = func_name[len("test_"):]
+        if func_name not in functions:
+            pytest.skip(f"No cases defined for {func_name} in {yaml_files}")
+
+        params, ids = [], []
+        for case in functions[func_name]['cases']:
+            params.append(case)
+            if isinstance(case, tuple):
+                case_temp, _ = case
+            else:
+                case_temp = case
+            ids.append(f"{case_temp['case_id']} ")
+
+        metafunc.parametrize("case_data", params, ids=ids)
 
 
-class YamlCaseError(Exception):
-    pass
+@pytest.fixture
+def function_resolver():
+    return resolve_function
 
 
-def load_function_cases(path: Path) -> Dict[str, List[Dict[str, Any]]]:
-    print(path)
-    if not path.exists():
-        raise YamlCaseError(f"YAML not found : {path}")
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
-            if not isinstance(data, dict):
-                raise YamlCaseError(f"{path} must contain a valid mapping")
-    except yaml.YAMLError as e:
-        raise YamlCaseError(f"Invalid YAML format in  {path}: {e}")
-
-    functions: Dict[str, Dict[List[Dict[str, Any]]]] = {}
-    try:
-        init = None
-        for func_name, case_types in data.items():
-            validated_cases = []
-            if case_types['type'] == 'class':
-                init = (case_types.get('init_parameters'))
-            for case in case_types['cases']:
-                jsonschema.validate(instance=case, schema=CASE_SCHEMA[case_types['type']])
-                expected = case.get("expected", {})
-                if "result" in expected and expected.get("error"):
-                    raise YamlCaseError(f"Case {case['case_id']}  in  {path} has both result  and error")
-                if case_types['type'] == 'class' and init:
-                    validated_cases.append((case, init))
-                else:
-                    validated_cases.append(case)
-            functions[func_name] = dict(type=case_types['type'], cases=validated_cases)
-    except jsonschema.ValidationError as e:
-        raise YamlCaseError(f"Schema validation failed for {path}: {e.message}")
-    return functions
+@pytest.fixture
+def class_resolver():
+    return resolve_class
