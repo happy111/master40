@@ -1,28 +1,254 @@
-import importlib
-from typing import Callable, Dict, List
+import copy
+from contextlib import ExitStack
+from datetime import datetime
+from typing import Any
+from unittest.mock import patch
 
-_FUNCTION_REGISTRY: Dict[str, List[str]] = {
-    "app.utils.AppUtility": ["str_to_bool", "create_hash", "platform_specific_topic_name",
-                             "get_watermark_attr", "build_job_name", "date_format", "is_valid_date",
-                             "lazy_load_function",
-                             "batch", "construct_connection_id", "application_log"],
-    "app.utils.s3_util": ["get_latest_key"],
-    "app.connectors.kafka.kafka_producer_consumer.KafkaConsumerManager": ["reset_to_begining"],
-    "app.dependencies": ["get_secret_config", "get_secret_as_text", "_get_secret_config",
-                         "_get_secret_config_parameter_store", "get_secret_config_parameter_store"],
-    "app.spec.kafka.default_properties_template": ["db_suffix", "_call_save_tier0_result", "add_app_config",
-                                                   "add_source_connector_config", "add_source_sink_connector_config"],
-
-}
+import pandas as pd
+import pytest
 
 
-def resolve_function(name: str) -> Callable:
-    result = next(
-        ((key, name) for key, values in _FUNCTION_REGISTRY.items() if name in values),
-        None
-    )
-    if not result:
-        raise ValueError(f"Unknown function in _FUNCTION_REGISTRY : {name}")
-    module_name, attr = result
-    module = importlib.import_module(module_name)
-    return getattr(module, attr)
+def _convert_row_cols(case_data, value):
+    current = copy.deepcopy(case_data)
+    for key in value:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            current = None
+    else:
+        if current:
+            inputs = {i["column"]: (
+                i["value"] if not i.get("return_datatype") else data_conversion(i["value"], i["return_datatype"])) for i
+                in
+                current}
+        else:
+            inputs = None
+    return inputs
+
+
+def get_class(class_name, case_data, monkeypatch=None, extra_params=None):
+    init_parameter = _convert_row_cols(case_data, ('init_parameter',)) if case_data.get('init_parameter') else None
+    if init_parameter:
+        class_instance = class_name(**init_parameter)
+    else:
+        class_instance = class_name()
+    return class_instance
+
+
+def __get_mocks(inputs, case_data, func, monkeypatch=None, extra_params=None, class_instance=None):
+    mocks = case_data.get("mocks", [])
+    if mocks:
+        assert_check(is_mock=True, mocks=mocks, expected=case_data['expected'], func=func, inputs=inputs,
+                     monkeypatch=monkeypatch,
+                     extra_params=extra_params, class_instance=class_instance)
+    else:
+        assert_check(expected=case_data['expected'], func=func, inputs=inputs, extra_params=extra_params,
+                     class_instance=class_instance)
+
+
+def generic_function(case_data, func, monkeypatch=None, extra_params=None):
+    inputs = _convert_row_cols(case_data, ('input',)) if case_data.get('input') else None
+    __get_mocks(inputs, case_data, func, monkeypatch, extra_params)
+
+
+def generic_class(case_data, class_name, func, monkeypatch=None, extra_params=None):
+    class_instance = get_class(class_name, case_data, monkeypatch, extra_params)
+    inputs = _convert_row_cols(case_data, ('input',)) if case_data.get('input') else None
+    __get_mocks(inputs, case_data, func, monkeypatch, extra_params, class_instance)
+
+def assert_check(expected, func, inputs, is_mock=False, mocks=None, monkeypatch=None, extra_params=None,
+                 mock_with_data_assertions=False, class_instance=None):
+    if is_mock:
+        if not mocks:
+            raise ValueError("Mock is required")
+        mock_completed = False
+        mocks_completed = list()
+        for mock in mocks:
+            if mock.get('type') and mock.get('type') == 'monkeypatch':
+                if mock.get('set_type') == 'env':
+                    mocks_completed.append(True)
+                    env = mock["return_value"]
+                    for key in env.keys():
+                        monkeypatch.delenv(key, raising=False)
+                    # Set only what this scenario needs
+                    for k, v in env.items():
+                        monkeypatch.setenv(k, v)
+                elif mock.get('set_type') == 'attr':
+                    mocks_completed.append(True)
+                    # mock_function = types.FunctionType(mock['return_value'], globals(), target)
+                    if mock.get("return_datatype"):
+                        monkeypatch.setattr(extra_params.get('name'), mock['target'],
+                                            lambda x: data_conversion(mock["return_value"], mock["return_datatype"]),
+                                            raising=True)
+                    else:
+                        monkeypatch.setattr(extra_params.get('name'), mock['target'],
+                                            lambda: mock["return_value"]
+                                            )
+                # elif mock.get('set_type') == 'item':
+                #     mocks_completed.append(True)
+                #     data_conversion(mock["return_value"], mock["return_datatype"])
+                #     monkeypatch.setitem(sys.modules, "app.db.daos.service.recon_dao_service", fake_mod)
+                #     if 'app.' in mock['target']:
+                #         fake_mod = types.ModuleType(".".join(mock['target'].split(".")[:-1]))
+                #         function_name=mock['target'][-1]
+                #         fake_mod.function_name = MagicMock(name=mock['target'][-1], return_value="OK")
+
+                # Important: inject the stub at the exact import path
+                # monkeypatch.setitem(sys.modules, "app.db.daos.service.recon_dao_service", fake_mod)
+            else:
+                mocks_completed.append(False)
+        if all(mocks_completed):
+            mock_completed = True
+            data_assertion(expected, func, inputs)
+        if not mock_completed and not mock_with_data_assertions:
+            mock_with_data_assertion(expected, func, inputs, mocks, mocks_completed, class_instance)
+    else:
+        data_assertion(expected, func, inputs, class_instance)
+
+
+def mock_with_data_assertion(expected, func, inputs, mocks, mocks_completed, extra_params=None, class_instance=None):
+    with ExitStack() as stack:
+        for i, mock in enumerate(mocks):
+            if not mocks_completed[i]:
+                if "side_effect" in mock:
+                    stack.enter_context(patch(mock["target"], side_effect=mock["side_effect"]))
+                else:
+                    stack.enter_context(
+                        patch(mock["target"], data_conversion(mock["return_value"], mock["return_datatype"])))
+        data_assertion(expected, func, inputs, class_instance)
+
+
+def data_assertion(expected, func, inputs, class_instance=None):
+    if expected.get("error"):
+        with pytest.raises(Exception) as exc:
+            if inputs:
+                func(**inputs) if not class_instance or not hasattr(class_instance, '__class__') else getattr(
+                    class_instance, func)(**inputs)
+            else:
+                func() if not class_instance or not hasattr(class_instance, '__class__') else getattr(class_instance,
+                                                                                                      func)()
+        assert expected["error"] in type(exc.value).__name__, f"Exception mismatch: {exc.value}"
+    else:
+        if inputs:
+            result = func(**inputs) if not class_instance or not hasattr(class_instance, '__class__') else getattr(
+                class_instance, func)(**inputs)
+        else:
+            result = func() if not class_instance or not hasattr(class_instance, '__class__') else getattr(
+                class_instance, func)()
+        if expected.get('result') and isinstance(expected.get('result'), dict):
+            if expected.get("return_datatype").lower() == 'dataframe':
+                print("\nExpected result:\n {}".format(pd.DataFrame(expected["result"]['rows'],
+                                                                    columns=expected["result"]['columns'])))
+                print(f"\nActual result:\n {result}")
+                pd.testing.assert_frame_equal(result, pd.DataFrame(expected["result"]['rows'],
+                                                                   columns=expected["result"][
+                                                                       'columns']))
+        else:
+            if expected.get("return_datatype"):
+                expected = data_conversion(expected["result"], expected["return_datatype"])
+            else:
+                expected = expected["result"]
+            print(f"\nActual result:\n {result}")
+            print("\nExpected result:\n {}".format(expected))
+            assert result == expected
+
+class DataConversionError(Exception):
+    pass
+
+
+def data_conversion(data_str: Any, type_descriptor: str):
+    def parse_value(value_str: str, target_type: str) -> Any:
+        try:
+            if target_type == "int":
+                return int(value_str)
+            elif target_type == "float":
+                return float(value_str)
+            elif target_type == "str":
+                return value_str
+            elif target_type == "bool":
+                return bool(value_str)
+            elif target_type == "datetime":
+                return datetime.fromisoformat(value_str)
+            else:
+                return value_str
+        except Exception as e:
+            raise DataConversionError(f"Failed to parse {value_str} as {target_type}: {e}")
+
+    if type_descriptor.startswith("tuple") and isinstance(data_str, str):
+        if data_str.strip() in ["()", ""]:
+            return ()
+        if "[" in type_descriptor:
+            inner = type_descriptor[type_descriptor.find("[") + 1:type_descriptor.find("]")]
+            inner_types = [t.strip() for t in inner.split(",")]
+            parts = [p.strip() for p in data_str.split(",")]
+            if len(inner_types) != len(parts):
+                raise DataConversionError("Mismatch between tuple schema and provided data")
+            return tuple(parse_value(p, t) for p, t in zip(parts, inner_types))
+        else:
+            parts = [p.strip() for p in data_str.split(",")]
+            return tuple(parts)
+
+    elif type_descriptor.startswith("list") and isinstance(data_str, str):
+        if data_str.strip() in ["[]", ""]:
+            return []
+        if "[" in type_descriptor:
+            inner = type_descriptor[type_descriptor.find("[") + 1:type_descriptor.find("]")]
+            inner_types = inner.strip()
+            parts = [p.strip() for p in data_str.split(",")]
+            return [parse_value(p, inner_types) for p in parts]
+        else:
+            return [p.strip() for p in data_str.split(",") if p.strip()]
+
+    elif type_descriptor.startswith("dict") and isinstance(data_str, str):
+        if data_str.strip() in ["{}", ""]:
+            return {}
+        if "[" in type_descriptor:
+            inner = type_descriptor[type_descriptor.find("[") + 1:type_descriptor.find("]")]
+            key_type, val_type = [t.strip() for t in inner.split(",")]
+        else:
+            key_type, val_type = "str", "str"
+
+        items = [p.strip() for p in data_str.split(",")]
+        result = {}
+        for item in items:
+            if ':' not in item:
+                raise DataConversionError("Dict Items must be in 'key:value' format")
+            k_str, v_str = [s.strip() for s in item.split(":", 1)]
+            key = parse_value(k_str, key_type)
+            value = parse_value(v_str, val_type)
+            result[key] = value
+        return result
+
+    elif type_descriptor.startswith("dataframe"):
+        if data_str.strip() in ["{}", ""]:
+            return pd.DataFrame()
+        if "[" in type_descriptor:
+            inner = type_descriptor[type_descriptor.find("[") + 1:type_descriptor.find("]")]
+            col_types = [t.strip() for t in inner.split(",")]
+        else:
+            col_types = None
+
+        rows = [r.strip() for r in data_str.replace("\n", ";").split(";") if r.strip()]
+        if not rows:
+            raise DataConversionError("No data provided for dataframe")
+
+        # First row= header
+        header = [h.strip() for h in rows[0].split(",")]
+        if not col_types:
+            col_types = [type(r) for r in header]
+        data_rows = rows[1:]
+        parsed_rows = []
+        for row in data_rows:
+            parts = [p.strip() for p in row.split(",")]
+            if col_types and len(parts) != len(col_types):
+                raise DataConversionError("Mismatch between dataframe schema and row data")
+            if col_types:
+                parsed_rows.append([parse_value(p, t) for p, t in zip(parts, col_types)])
+        return pd.DataFrame(parsed_rows, columns=header)
+    else:
+        return parse_value(data_str, type_descriptor)
+
+
+def named_tuple(data_str: dict, name: str):
+    from collections import namedtuple
+    return namedtuple(name, data_str)
