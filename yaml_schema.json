@@ -1,72 +1,18 @@
-{
-  "$schema": "http://json-schema.org/draft-07/schema#",
-  "type": "object",
-  "required": [
-	"case_id",
-	"description",
-	"input",
-	"expected"
-  ],
-  "properties": {
-	"case_id": {
-	  "type": "string",
-	  "minLength": 1
-	},
-	"description": {
-	  "type": "string",
-	  "minLength": 1
-	},
-	"input": {
-	  "type": "array",
-	  "minItems": 1,
-	  "items": {
-		"type": "object",
-		"required": [
-		  "column",
-		  "value"
-		],
-		"properties": {
-		  "column": {
-			"type": "string",
-			"minLength": 1
-		  },
-		  "value": { }
-		},
-		"additionalProperties": false
-	  }
-	},
-	"expected": {
-	  "type": "object",
-	  "properties": {
-		"result": { },
-		"error": {
-		  "type": [
-			"string",
-			"null"
-		  ]
-		}
-	  },
-	  "additionalProperties": false
-	},
-	"mocks": {
-	  "type": "array",
-	  "items": {
-		"type": "object",
-		"required": [
-		  "target"
-		],
-		"properties": {
-		  "target": {
-			"type": "string"
-		  },
-		  "return_value": { },
-		  "side_effect": {
-			"type": "string"
-		  }
-		},
-		"additionalProperties": false
-	  }
-	}
-  },
-  "additionalProperties": false
+import importlib
+from typing import Callable, Dict, List
+
+_CLASS_REGISTRY: Dict[str, List[str]] = {
+    "app.spec.kafka.subject": ["Subject"]
 }
+
+
+def resolve_class(name: str) -> Callable:
+    result = next(
+        ((key, name) for key, values in _CLASS_REGISTRY.items() if name in values),
+        None
+    )
+    if not result:
+        raise ValueError(f"Unknown function in _CLASS_REGISTRY : {name}")
+    module_name, attr = result
+    module = importlib.import_module(module_name)
+    return getattr(module, attr)
