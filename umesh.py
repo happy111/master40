@@ -1,54 +1,39 @@
+import sys
+import yaml
 from pathlib import Path
-from rdflib import Graph
-from pyshacl import validate
 
 
-ONTOLOGY_FILE = Path("ontology/commercial-domain-model.ttl")
-SHACL_FILE = Path("shapes/commercial-shapes.ttl")
+CONFIG_FILE = Path("config/approvers.yaml")
 
 
-def validate_ontology():
-    print("=" * 60)
-    print("ONTOLOGY VALIDATION")
-    print("=" * 60)
+def identify_approver(ontology_type: str) -> str:
+    if not CONFIG_FILE.exists():
+        raise FileNotFoundError(
+            f"Approver configuration not found: {CONFIG_FILE}"
+        )
 
-    if not ONTOLOGY_FILE.exists():
-        raise FileNotFoundError(f"Ontology not found: {ONTOLOGY_FILE}")
+    with CONFIG_FILE.open("r", encoding="utf-8") as file:
+        config = yaml.safe_load(file)
 
-    if not SHACL_FILE.exists():
-        raise FileNotFoundError(f"SHACL file not found: {SHACL_FILE}")
+    approvers = config.get("approvers", {})
 
-    ontology_graph = Graph()
-    ontology_graph.parse(ONTOLOGY_FILE, format="turtle")
+    reviewers = approvers.get(ontology_type)
 
-    print(f"Ontology: {ONTOLOGY_FILE}")
-    print(f"Triples: {len(ontology_graph)}")
+    if not reviewers:
+        raise ValueError(
+            f"No approver configured for ontology type: {ontology_type}"
+        )
 
-    shacl_graph = Graph()
-    shacl_graph.parse(SHACL_FILE, format="turtle")
-
-    print(f"SHACL: {SHACL_FILE}")
-    print(f"SHACL triples: {len(shacl_graph)}")
-
-    conforms, results_graph, results_text = validate(
-        ontology_graph,
-        shacl_graph=shacl_graph,
-        inference="none",
-        abort_on_first=False,
-        allow_infos=True,
-        allow_warnings=True,
-    )
-
-    print("\nSHACL validation result:")
-    print(results_text)
-
-    if not conforms:
-        raise RuntimeError("SHACL validation FAILED")
-
-    print("SHACL validation PASSED")
-
-    return True
+    return reviewers[0]
 
 
 if __name__ == "__main__":
-    validate_ontology()
+    ontology_type = sys.argv[1] if len(sys.argv) > 1 else "commercial"
+
+    reviewer = identify_approver(ontology_type)
+
+    print("=" * 60)
+    print("APPROVER IDENTIFICATION")
+    print("=" * 60)
+    print(f"Ontology type : {ontology_type}")
+    print(f"Approver      : {reviewer}")
