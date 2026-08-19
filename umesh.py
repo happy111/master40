@@ -1,95 +1,118 @@
-import argparse
-from pathlib import Path
+pipeline {
 
-import boto3
+    agent any
 
+    environment {
+        ONTOLOGY_VERSION = "0.1.0"
+        ONTOLOGY_TYPE = "commercial"
+        PACKET_ID = "ontology-${BUILD_NUMBER}"
 
-ONTOLOGY_FILE = Path("ontology/commercial-domain-model.ttl")
-SHACL_FILE = Path("shapes/commercial-shapes.ttl")
-MANIFEST_FILE = Path("deployment/manifest.json")
+        // Configure these in Jenkins Credentials / environment.
+        AWS_REGION = credentials('aws-region')
+        AWS_S3_BUCKET = credentials('ontology-s3-bucket')
+    }
 
+    stages {
 
-def upload_file(s3_client, bucket, local_file, s3_key):
-    print(f"Uploading {local_file} -> s3://{bucket}/{s3_key}")
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
 
-    s3_client.upload_file(
-        str(local_file),
-        bucket,
-        s3_key,
-    )
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    python3 -m venv .venv
+                    . .venv/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
 
+        stage('Validate Ontology') {
+            steps {
+                sh '''
+                    . .venv/bin/activate
+                    python scripts/validate_ontology.py
+                '''
+            }
+        }
 
-def deploy(bucket: str, packet_id: str):
-    if not ONTOLOGY_FILE.exists():
-        raise FileNotFoundError(ONTOLOGY_FILE)
+        stage('Identify Approver') {
+            steps {
+                sh '''
+                    . .venv/bin/activate
 
-    if not SHACL_FILE.exists():
-        raise FileNotFoundError(SHACL_FILE)
+                    python scripts/identify_approver.py \
+                        "$ONTOLOGY_TYPE"
+                '''
+            }
+        }
 
-    if not MANIFEST_FILE.exists():
-        raise FileNotFoundError(
-            "manifest.json must exist before deployment."
-        )
+        stage('Approval Gate') {
+            steps {
+                input(
+                    message: 'Has the ontology been reviewed and approved?',
+                    ok: 'Approve and Continue',
+                    submitter: 'ontology-reviewers'
+                )
+            }
+        }
 
-    s3 = boto3.client("s3")
+        stage('Record Approval') {
+            steps {
+                script {
+                    def commitSha = sh(
+                        script: 'git rev-parse HEAD',
+                        returnStdout: true
+                    ).trim()
 
-    prefix = f"incoming/centree/{packet_id}"
+                    sh """
+                        . .venv/bin/activate
 
-    # ---------------------------------------------------------
-    # IMPORTANT:
-    # Upload ontology and SHACL first.
-    # ---------------------------------------------------------
+                        python scripts/approval.py \
+                            --approve \
+                            --approver ontology-reviewer@example.com \
+                            --commit ${commitSha}
+                    """
+                }
+            }
+        }
 
-    upload_file(
-        s3,
-        bucket,
-        ONTOLOGY_FILE,
-        f"{prefix}/ontology/commercial-domain-model.ttl",
-    )
+        stage('Generate Manifest') {
+            steps {
+                sh '''
+                    . .venv/bin/activate
 
-    upload_file(
-        s3,
-        bucket,
-        SHACL_FILE,
-        f"{prefix}/shapes/commercial-shapes.ttl",
-    )
+                    python scripts/generate_manifest.py
+                '''
+            }
+        }
 
-    # ---------------------------------------------------------
-    # MANIFEST MUST BE LAST
-    # ---------------------------------------------------------
+        stage('Deploy to S3') {
+            steps {
+                sh '''
+                    . .venv/bin/activate
 
-    upload_file(
-        s3,
-        bucket,
-        MANIFEST_FILE,
-        f"{prefix}/manifest.json",
-    )
+                    export AWS_DEFAULT_REGION="$AWS_REGION"
 
-    print()
-    print("=" * 60)
-    print("DEPLOYMENT COMPLETE")
-    print("=" * 60)
-    print(f"s3://{bucket}/{prefix}/")
+                    python scripts/deploy_s3.py \
+                        --bucket "$AWS_S3_BUCKET" \
+                        --packet-id "$PACKET_ID"
+                '''
+            }
+        }
+    }
 
+    post {
+        success {
+            echo 'Ontology approval and deployment completed successfully.'
+        }
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--bucket",
-        required=True,
-        help="Target S3 bucket"
-    )
-
-    parser.add_argument(
-        "--packet-id",
-        required=True,
-        help="Unique deployment packet ID"
-    )
-
-    args = parser.parse_args()
-
-    deploy(
-        bucket=args.bucket,
-        packet_id=args.packet_id,
-    )
+        failure {
+            echo 'Ontology approval/deployment pipeline FAILED.'
+        }
+    }
+}
