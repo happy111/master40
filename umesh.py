@@ -1,110 +1,95 @@
-import hashlib
-import json
-import os
+import argparse
 from pathlib import Path
 
-from rdflib import Graph
+import boto3
 
 
 ONTOLOGY_FILE = Path("ontology/commercial-domain-model.ttl")
 SHACL_FILE = Path("shapes/commercial-shapes.ttl")
-APPROVAL_FILE = Path("deployment/approval.json")
-
 MANIFEST_FILE = Path("deployment/manifest.json")
 
 
-def calculate_sha256(file_path: Path) -> str:
-    sha256 = hashlib.sha256()
+def upload_file(s3_client, bucket, local_file, s3_key):
+    print(f"Uploading {local_file} -> s3://{bucket}/{s3_key}")
 
-    with file_path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            sha256.update(chunk)
-
-    return sha256.hexdigest()
-
-
-def count_triples(file_path: Path) -> int:
-    graph = Graph()
-    graph.parse(file_path, format="turtle")
-    return len(graph)
+    s3_client.upload_file(
+        str(local_file),
+        bucket,
+        s3_key,
+    )
 
 
-def load_approval():
-    if not APPROVAL_FILE.exists():
-        raise FileNotFoundError(
-            "Approval file does not exist. Deployment is not allowed."
-        )
-
-    with APPROVAL_FILE.open("r", encoding="utf-8") as file:
-        approval = json.load(file)
-
-    if approval.get("status") != "approved":
-        raise RuntimeError(
-            "Ontology is not approved. Manifest cannot be generated."
-        )
-
-    return approval
-
-
-def generate_manifest():
+def deploy(bucket: str, packet_id: str):
     if not ONTOLOGY_FILE.exists():
         raise FileNotFoundError(ONTOLOGY_FILE)
 
     if not SHACL_FILE.exists():
         raise FileNotFoundError(SHACL_FILE)
 
-    approval = load_approval()
+    if not MANIFEST_FILE.exists():
+        raise FileNotFoundError(
+            "manifest.json must exist before deployment."
+        )
 
-    ontology_sha256 = calculate_sha256(ONTOLOGY_FILE)
-    shacl_sha256 = calculate_sha256(SHACL_FILE)
+    s3 = boto3.client("s3")
 
-    triple_count = count_triples(ONTOLOGY_FILE)
+    prefix = f"incoming/centree/{packet_id}"
 
-    version = os.getenv("ONTOLOGY_VERSION", "0.1.0")
-    commit_sha = approval["commitSha"]
+    # ---------------------------------------------------------
+    # IMPORTANT:
+    # Upload ontology and SHACL first.
+    # ---------------------------------------------------------
 
-    manifest = {
-        "manifestSchemaVersion": "1.0.0",
-        "artifacts": [
-            {
-                "artifactId": "commercial-domain-model",
-                "version": version,
-                "file": (
-                    "ontology/"
-                    "commercial-domain-model.ttl"
-                ),
-                "format": "turtle",
-                "sha256": ontology_sha256,
-                "tripleCount": triple_count,
-                "approvalStatus": "approved",
-                "approvedBy": approval["approvedBy"],
-                "sourceRef": f"git:{commit_sha}",
-            },
-            {
-                "artifactId": "commercial-shapes",
-                "version": version,
-                "file": "shapes/commercial-shapes.ttl",
-                "format": "turtle",
-                "sha256": shacl_sha256,
-                "approvalStatus": "approved",
-                "approvedBy": approval["approvedBy"],
-                "sourceRef": f"git:{commit_sha}",
-            },
-        ],
-    }
+    upload_file(
+        s3,
+        bucket,
+        ONTOLOGY_FILE,
+        f"{prefix}/ontology/commercial-domain-model.ttl",
+    )
 
-    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+    upload_file(
+        s3,
+        bucket,
+        SHACL_FILE,
+        f"{prefix}/shapes/commercial-shapes.ttl",
+    )
 
-    with MANIFEST_FILE.open("w", encoding="utf-8") as file:
-        json.dump(manifest, file, indent=2)
+    # ---------------------------------------------------------
+    # MANIFEST MUST BE LAST
+    # ---------------------------------------------------------
 
+    upload_file(
+        s3,
+        bucket,
+        MANIFEST_FILE,
+        f"{prefix}/manifest.json",
+    )
+
+    print()
     print("=" * 60)
-    print("MANIFEST GENERATED")
+    print("DEPLOYMENT COMPLETE")
     print("=" * 60)
-    print(json.dumps(manifest, indent=2))
-
-    return MANIFEST_FILE
+    print(f"s3://{bucket}/{prefix}/")
 
 
 if __name__ == "__main__":
-    generate_manifest()
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--bucket",
+        required=True,
+        help="Target S3 bucket"
+    )
+
+    parser.add_argument(
+        "--packet-id",
+        required=True,
+        help="Unique deployment packet ID"
+    )
+
+    args = parser.parse_args()
+
+    deploy(
+        bucket=args.bucket,
+        packet_id=args.packet_id,
+    )
