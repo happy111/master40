@@ -1,59 +1,110 @@
-import argparse
+import hashlib
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 
+from rdflib import Graph
 
+
+ONTOLOGY_FILE = Path("ontology/commercial-domain-model.ttl")
+SHACL_FILE = Path("shapes/commercial-shapes.ttl")
 APPROVAL_FILE = Path("deployment/approval.json")
 
+MANIFEST_FILE = Path("deployment/manifest.json")
 
-def create_approval(approved: bool, approver: str, commit_sha: str):
-    if not approved:
-        print("Ontology was NOT approved.")
-        return
 
-    APPROVAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+def calculate_sha256(file_path: Path) -> str:
+    sha256 = hashlib.sha256()
 
-    approval = {
-        "status": "approved",
-        "approvedBy": approver,
-        "approvedAt": datetime.now(timezone.utc).isoformat(),
-        "commitSha": commit_sha,
+    with file_path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+def count_triples(file_path: Path) -> int:
+    graph = Graph()
+    graph.parse(file_path, format="turtle")
+    return len(graph)
+
+
+def load_approval():
+    if not APPROVAL_FILE.exists():
+        raise FileNotFoundError(
+            "Approval file does not exist. Deployment is not allowed."
+        )
+
+    with APPROVAL_FILE.open("r", encoding="utf-8") as file:
+        approval = json.load(file)
+
+    if approval.get("status") != "approved":
+        raise RuntimeError(
+            "Ontology is not approved. Manifest cannot be generated."
+        )
+
+    return approval
+
+
+def generate_manifest():
+    if not ONTOLOGY_FILE.exists():
+        raise FileNotFoundError(ONTOLOGY_FILE)
+
+    if not SHACL_FILE.exists():
+        raise FileNotFoundError(SHACL_FILE)
+
+    approval = load_approval()
+
+    ontology_sha256 = calculate_sha256(ONTOLOGY_FILE)
+    shacl_sha256 = calculate_sha256(SHACL_FILE)
+
+    triple_count = count_triples(ONTOLOGY_FILE)
+
+    version = os.getenv("ONTOLOGY_VERSION", "0.1.0")
+    commit_sha = approval["commitSha"]
+
+    manifest = {
+        "manifestSchemaVersion": "1.0.0",
+        "artifacts": [
+            {
+                "artifactId": "commercial-domain-model",
+                "version": version,
+                "file": (
+                    "ontology/"
+                    "commercial-domain-model.ttl"
+                ),
+                "format": "turtle",
+                "sha256": ontology_sha256,
+                "tripleCount": triple_count,
+                "approvalStatus": "approved",
+                "approvedBy": approval["approvedBy"],
+                "sourceRef": f"git:{commit_sha}",
+            },
+            {
+                "artifactId": "commercial-shapes",
+                "version": version,
+                "file": "shapes/commercial-shapes.ttl",
+                "format": "turtle",
+                "sha256": shacl_sha256,
+                "approvalStatus": "approved",
+                "approvedBy": approval["approvedBy"],
+                "sourceRef": f"git:{commit_sha}",
+            },
+        ],
     }
 
-    with APPROVAL_FILE.open("w", encoding="utf-8") as file:
-        json.dump(approval, file, indent=2)
+    MANIFEST_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+    with MANIFEST_FILE.open("w", encoding="utf-8") as file:
+        json.dump(manifest, file, indent=2)
 
     print("=" * 60)
-    print("ONTOLOGY APPROVAL")
+    print("MANIFEST GENERATED")
     print("=" * 60)
-    print(json.dumps(approval, indent=2))
+    print(json.dumps(manifest, indent=2))
+
+    return MANIFEST_FILE
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-
-    parser.add_argument(
-        "--approve",
-        action="store_true",
-        help="Approve the ontology"
-    )
-
-    parser.add_argument(
-        "--approver",
-        required=True
-    )
-
-    parser.add_argument(
-        "--commit",
-        default=os.getenv("GIT_COMMIT", "LOCAL-DEMO-COMMIT")
-    )
-
-    args = parser.parse_args()
-
-    create_approval(
-        approved=args.approve,
-        approver=args.approver,
-        commit_sha=args.commit,
-    )
+    generate_manifest()
