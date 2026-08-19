@@ -1,21 +1,12 @@
-ontology-poc/
-│
-├── ontology/
-│   └── commercial-domain-model.ttl
-│
-├── shapes/
-│   └── commercial-shapes.ttl
-│
-├── config/
-│   └── approvers.yaml
-│
-├── scripts/
-│   ├── identify_approver.py
-│   ├── send_notification.py
-│   ├── generate_manifest.py
-│   └── deploy_s3.py
-│
-├── tests/
-│
-├── requirements.txt
-└── README.md
+def identify_approver(ontology_type):
+    approvers = {
+        "commercial": "reviewer@example.com",
+        "medical": "medical-reviewer@example.com"
+    }
+
+    return approvers.get(ontology_type)
+
+
+if __name__ == "__main__":
+    reviewer = identify_approver("commercial")
+    print(f"Approver: {reviewer}")
