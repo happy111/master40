@@ -1,39 +1,59 @@
-import sys
-import yaml
+import argparse
+import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 
-CONFIG_FILE = Path("config/approvers.yaml")
+APPROVAL_FILE = Path("deployment/approval.json")
 
 
-def identify_approver(ontology_type: str) -> str:
-    if not CONFIG_FILE.exists():
-        raise FileNotFoundError(
-            f"Approver configuration not found: {CONFIG_FILE}"
-        )
+def create_approval(approved: bool, approver: str, commit_sha: str):
+    if not approved:
+        print("Ontology was NOT approved.")
+        return
 
-    with CONFIG_FILE.open("r", encoding="utf-8") as file:
-        config = yaml.safe_load(file)
+    APPROVAL_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    approvers = config.get("approvers", {})
+    approval = {
+        "status": "approved",
+        "approvedBy": approver,
+        "approvedAt": datetime.now(timezone.utc).isoformat(),
+        "commitSha": commit_sha,
+    }
 
-    reviewers = approvers.get(ontology_type)
+    with APPROVAL_FILE.open("w", encoding="utf-8") as file:
+        json.dump(approval, file, indent=2)
 
-    if not reviewers:
-        raise ValueError(
-            f"No approver configured for ontology type: {ontology_type}"
-        )
-
-    return reviewers[0]
+    print("=" * 60)
+    print("ONTOLOGY APPROVAL")
+    print("=" * 60)
+    print(json.dumps(approval, indent=2))
 
 
 if __name__ == "__main__":
-    ontology_type = sys.argv[1] if len(sys.argv) > 1 else "commercial"
+    parser = argparse.ArgumentParser()
 
-    reviewer = identify_approver(ontology_type)
+    parser.add_argument(
+        "--approve",
+        action="store_true",
+        help="Approve the ontology"
+    )
 
-    print("=" * 60)
-    print("APPROVER IDENTIFICATION")
-    print("=" * 60)
-    print(f"Ontology type : {ontology_type}")
-    print(f"Approver      : {reviewer}")
+    parser.add_argument(
+        "--approver",
+        required=True
+    )
+
+    parser.add_argument(
+        "--commit",
+        default=os.getenv("GIT_COMMIT", "LOCAL-DEMO-COMMIT")
+    )
+
+    args = parser.parse_args()
+
+    create_approval(
+        approved=args.approve,
+        approver=args.approver,
+        commit_sha=args.commit,
+    )
