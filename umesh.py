@@ -1,118 +1,118 @@
-pipeline {
+import argparse
+import os
+import smtplib
+from email.message import EmailMessage
 
-    agent any
 
-    environment {
-        ONTOLOGY_VERSION = "0.1.0"
-        ONTOLOGY_TYPE = "commercial"
-        PACKET_ID = "ontology-${BUILD_NUMBER}"
+def send_approval_email(
+    approver_email: str,
+    ontology_name: str,
+    version: str,
+    commit_sha: str,
+    ontology_url: str,
+):
+    smtp_host = os.environ["SMTP_HOST"]
+    smtp_port = int(os.getenv("SMTP_PORT", "587"))
+    smtp_username = os.environ["SMTP_USERNAME"]
+    smtp_password = os.environ["SMTP_PASSWORD"]
 
-        // Configure these in Jenkins Credentials / environment.
-        AWS_REGION = credentials('aws-region')
-        AWS_S3_BUCKET = credentials('ontology-s3-bucket')
-    }
+    from_email = os.environ["FROM_EMAIL"]
 
-    stages {
+    subject = (
+        f"Ontology Approval Required - "
+        f"{ontology_name} - {version}"
+    )
 
-        stage('Checkout') {
-            steps {
-                checkout scm
-            }
-        }
+    body = f"""
+Hello,
 
-        stage('Install Dependencies') {
-            steps {
-                sh '''
-                    python3 -m venv .venv
-                    . .venv/bin/activate
-                    pip install --upgrade pip
-                    pip install -r requirements.txt
-                '''
-            }
-        }
+An ontology has been submitted for formal review.
 
-        stage('Validate Ontology') {
-            steps {
-                sh '''
-                    . .venv/bin/activate
-                    python scripts/validate_ontology.py
-                '''
-            }
-        }
+Ontology:
+{ontology_name}
 
-        stage('Identify Approver') {
-            steps {
-                sh '''
-                    . .venv/bin/activate
+Version:
+{version}
 
-                    python scripts/identify_approver.py \
-                        "$ONTOLOGY_TYPE"
-                '''
-            }
-        }
+Git Commit:
+{commit_sha}
 
-        stage('Approval Gate') {
-            steps {
-                input(
-                    message: 'Has the ontology been reviewed and approved?',
-                    ok: 'Approve and Continue',
-                    submitter: 'ontology-reviewers'
-                )
-            }
-        }
+Please review the submitted ontology/version using the link below:
 
-        stage('Record Approval') {
-            steps {
-                script {
-                    def commitSha = sh(
-                        script: 'git rev-parse HEAD',
-                        returnStdout: true
-                    ).trim()
+{ontology_url}
 
-                    sh """
-                        . .venv/bin/activate
+This version must be reviewed and approved before deployment.
 
-                        python scripts/approval.py \
-                            --approve \
-                            --approver ontology-reviewer@example.com \
-                            --commit ${commitSha}
-                    """
-                }
-            }
-        }
+Regards,
+Ontology CI/CD Pipeline
+"""
 
-        stage('Generate Manifest') {
-            steps {
-                sh '''
-                    . .venv/bin/activate
+    message = EmailMessage()
 
-                    python scripts/generate_manifest.py
-                '''
-            }
-        }
+    message["Subject"] = subject
+    message["From"] = from_email
+    message["To"] = approver_email
 
-        stage('Deploy to S3') {
-            steps {
-                sh '''
-                    . .venv/bin/activate
+    message.set_content(body)
 
-                    export AWS_DEFAULT_REGION="$AWS_REGION"
+    print("=" * 60)
+    print("SENDING APPROVAL EMAIL")
+    print("=" * 60)
+    print(f"To       : {approver_email}")
+    print(f"Subject  : {subject}")
+    print(f"Ontology : {ontology_name}")
+    print(f"Version  : {version}")
+    print(f"Commit   : {commit_sha}")
+    print(f"Link     : {ontology_url}")
 
-                    python scripts/deploy_s3.py \
-                        --bucket "$AWS_S3_BUCKET" \
-                        --packet-id "$PACKET_ID"
-                '''
-            }
-        }
-    }
+    with smtplib.SMTP(smtp_host, smtp_port) as smtp:
+        smtp.starttls()
 
-    post {
-        success {
-            echo 'Ontology approval and deployment completed successfully.'
-        }
+        smtp.login(
+            smtp_username,
+            smtp_password,
+        )
 
-        failure {
-            echo 'Ontology approval/deployment pipeline FAILED.'
-        }
-    }
-}
+        smtp.send_message(message)
+
+    print("Approval email sent successfully.")
+
+
+if __name__ == "__main__":
+
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--approver",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--ontology",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--version",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--commit",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--url",
+        required=True,
+    )
+
+    args = parser.parse_args()
+
+    send_approval_email(
+        approver_email=args.approver,
+        ontology_name=args.ontology,
+        version=args.version,
+        commit_sha=args.commit,
+        ontology_url=args.url,
+    )
