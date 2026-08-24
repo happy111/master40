@@ -1,0 +1,18 @@
+bitbucket:
+  project_key: "NOVAOS"
+  repository: "ontology-repository"
+  target_branch: "develop"
+
+reviewers:
+  default:
+    - "reviewer1"
+    - "reviewer2"
+
+email:
+  default:
+    - "reviewer1@example.com"
+    - "reviewer2@example.com"
+
+s3:
+  bucket: "novaos-ontology-dev"
+  prefix: "ontology"
