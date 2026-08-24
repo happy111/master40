@@ -1,18 +1,18 @@
-bitbucket:
-  project_key: "NOVAOS"
-  repository: "ontology-repository"
-  target_branch: "develop"
+BITBUCKET_URL=https://bitbucket.example.com
+BITBUCKET_USERNAME=jenkins-user
+BITBUCKET_PASSWORD=your-password
 
-reviewers:
-  default:
-    - "reviewer1"
-    - "reviewer2"
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=your-smtp-user
+SMTP_PASSWORD=your-smtp-password
+FROM_EMAIL=novaos@example.com
 
-email:
-  default:
-    - "reviewer1@example.com"
-    - "reviewer2@example.com"
+CUSTOM_REVIEWER_EMAIL=
 
-s3:
-  bucket: "novaos-ontology-dev"
-  prefix: "ontology"
+AWS_REGION=ap-south-1
+AWS_ACCESS_KEY_ID=your-key
+AWS_SECRET_ACCESS_KEY=your-secret
+
+S3_BUCKET=novaos-ontology-dev
+S3_PREFIX=ontology
