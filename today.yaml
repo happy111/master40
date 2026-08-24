@@ -38,8 +38,15 @@ def generate_manifest():
         "files": artifacts,
     }
 
+    # Create deployment directory if it doesn't exist
+    deployment_dir = Path("deployment")
+    deployment_dir.mkdir(parents=True, exist_ok=True)
+
+    # Create manifest.json inside deployment folder
+    manifest_path = deployment_dir / "manifest.json"
+
     with open(
-        "manifest.json",
+        manifest_path,
         "w",
         encoding="utf-8",
     ) as file:
@@ -50,7 +57,7 @@ def generate_manifest():
             indent=4,
         )
 
-    print("manifest.json generated successfully")
+    print(f"{manifest_path} generated successfully")
 
 
 if __name__ == "__main__":
