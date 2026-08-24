@@ -1,5 +1,57 @@
-@prefix ex: <http://example.com/> .
+import hashlib
+import json
+from pathlib import Path
 
-ex:MedicalProduct
-    a ex:Product ;
-    ex:name "Medical Product" .
+
+def calculate_checksum(file_path):
+    sha256 = hashlib.sha256()
+
+    with open(file_path, "rb") as file:
+        while chunk := file.read(8192):
+            sha256.update(chunk)
+
+    return sha256.hexdigest()
+
+
+def find_ttl_files():
+    return list(Path("ontology").rglob("*.ttl"))
+
+
+def generate_manifest():
+
+    ttl_files = find_ttl_files()
+
+    artifacts = []
+
+    for file_path in ttl_files:
+
+        artifacts.append(
+            {
+                "path": file_path.as_posix(),
+                "size": file_path.stat().st_size,
+                "sha256": calculate_checksum(file_path),
+            }
+        )
+
+    manifest = {
+        "version": "1.0",
+        "files": artifacts,
+    }
+
+    with open(
+        "manifest.json",
+        "w",
+        encoding="utf-8",
+    ) as file:
+
+        json.dump(
+            manifest,
+            file,
+            indent=4,
+        )
+
+    print("manifest.json generated successfully")
+
+
+if __name__ == "__main__":
+    generate_manifest()
