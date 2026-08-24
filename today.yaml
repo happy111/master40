@@ -1,93 +1,64 @@
-import os
-
-import requests
-from dotenv import load_dotenv
-
-
-load_dotenv()
+import hashlib
+import json
+from pathlib import Path
 
 
-def create_pull_request():
+def calculate_checksum(file_path):
+    sha256 = hashlib.sha256()
 
-    base_url = os.environ["BITBUCKET_URL"]
+    with open(file_path, "rb") as file:
+        while chunk := file.read(8192):
+            sha256.update(chunk)
 
-    project = os.environ[
-        "BITBUCKET_PROJECT_KEY"
-    ]
+    return sha256.hexdigest()
 
-    repository = os.environ[
-        "BITBUCKET_REPOSITORY"
-    ]
 
-    username = os.environ[
-        "BITBUCKET_USERNAME"
-    ]
+def find_ttl_files():
+    return list(Path("ontology").rglob("*.ttl"))
 
-    password = os.environ[
-        "BITBUCKET_PASSWORD"
-    ]
 
-    source_branch = os.environ[
-        "BRANCH_NAME"
-    ]
+def generate_manifest():
 
-    target_branch = os.environ.get(
-        "TARGET_BRANCH",
-        "develop",
-    )
+    ttl_files = find_ttl_files()
 
-    url = (
-        f"{base_url}/rest/api/latest/"
-        f"projects/{project}/repos/"
-        f"{repository}/pull-requests"
-    )
+    artifacts = []
 
-    data = {
-        "title": (
-            f"Ontology update - "
-            f"{source_branch}"
-        ),
-        "description": (
-            "Automatically created "
-            "ontology pull request."
-        ),
-        "fromRef": {
-            "id": (
-                f"refs/heads/"
-                f"{source_branch}"
-            )
-        },
-        "toRef": {
-            "id": (
-                f"refs/heads/"
-                f"{target_branch}"
-            )
-        },
+    for file_path in ttl_files:
+
+        artifacts.append(
+            {
+                "path": file_path.as_posix(),
+                "size": file_path.stat().st_size,
+                "sha256": calculate_checksum(file_path),
+            }
+        )
+
+    manifest = {
+        "version": "1.0",
+        "files": artifacts,
     }
 
-    response = requests.post(
-        url,
-        json=data,
-        auth=(username, password),
-        timeout=30,
-    )
+    # Create deployment directory if it doesn't exist
+    deployment_dir = Path("deployment")
+    deployment_dir.mkdir(parents=True, exist_ok=True)
 
-    response.raise_for_status()
+    # Create manifest.json inside deployment folder
+    manifest_path = deployment_dir / "manifest.json"
 
-    result = response.json()
+    with open(
+        manifest_path,
+        "w",
+        encoding="utf-8",
+    ) as file:
 
-    print(
-        "PR created:",
-        result["id"],
-    )
+        json.dump(
+            manifest,
+            file,
+            indent=4,
+        )
 
-    print(
-        "PR URL:",
-        result["links"]["self"][0]["href"],
-    )
-
-    return result
+    print(f"{manifest_path} generated successfully")
 
 
 if __name__ == "__main__":
-    create_pull_request()
+    generate_manifest()
