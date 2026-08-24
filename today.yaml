@@ -1,4 +1,5 @@
-.venv/
-.env
-__pycache__/
-*.pyc
+@prefix ex: <http://example.com/> .
+
+ex:MedicalProduct
+    a ex:Product ;
+    ex:name "Medical Product" .
