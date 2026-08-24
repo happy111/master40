@@ -1,5 +1,77 @@
-@prefix ex: <http://example.com/> .
-
-ex:MedicalProduct
-    a ex:Product ;
-    ex:name "Medical Product" .
+                    ┌────────────────────┐
+                    │     Developer      │
+                    └─────────┬──────────┘
+                              │
+                         git push
+                              │
+                              ▼
+                    ┌────────────────────┐
+                    │ Feature Branch     │
+                    │                    │
+                    │ *.ttl              │
+                    └─────────┬──────────┘
+                              │
+                           Webhook
+                              │
+                              ▼
+                    ┌────────────────────┐
+                    │     Jenkins #1     │
+                    └─────────┬──────────┘
+                              │
+                    generate_manifest.py
+                              │
+                              ▼
+                       manifest.json
+                              │
+                              ▼
+                         git commit
+                              │
+                              ▼
+                          git push
+                              │
+                              ▼
+                       create_pr.py
+                              │
+                              ▼
+                         Bitbucket PR
+                              │
+                              ▼
+                    assign_reviewers.py
+                              │
+                              ▼
+                       send_email.py
+                              │
+                              ▼
+                       ┌────────────┐
+                       │  Reviewer  │
+                       └─────┬──────┘
+                             │
+                           Approve
+                             │
+                             ▼
+                           Merge
+                             │
+                             ▼
+                          develop
+                             │
+                          Webhook
+                             │
+                             ▼
+                    ┌────────────────────┐
+                    │     Jenkins #2     │
+                    └─────────┬──────────┘
+                              │
+                     detect_changes.py
+                              │
+                              ▼
+                     Incremental files
+                              │
+                              ▼
+                       deploy_s3.py
+                              │
+                              ▼
+                    ┌────────────────────┐
+                    │       AWS S3       │
+                    │                    │
+                    │ TTL + manifest     │
+                    └────────────────────┘
