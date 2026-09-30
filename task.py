@@ -13,3 +13,12 @@ Write unit tests for manifest generation, input validation, and error handling.
 Integrate the Python scripts with the existing Jenkins pipeline, in coordination with the DevOps team.
 
 Perform local testing and support end-to-end pipeline testing in the development environment.
+
+
+
+The file commit story is missing, which one corresponds to that
+ 
+also, for coding scripts you can create a single story and put testing logging and other auxiliaries as subtasks
+ 
+for any missing tests and logging you can have a separate story
+ 
